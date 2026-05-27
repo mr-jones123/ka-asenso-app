@@ -1,7 +1,9 @@
 # Ka Asenso — Feature Reference
 
 > Voice AI franchise sales agent for the Philippine market.
-> Built with Next.js 16, Agora Conversational AI, Gemini 2.5 Flash, and ElevenLabs TTS.
+> Built with Next.js 16, React 19, Agora Conversational AI, and Gemini 2.5 Flash.
+> Speech: Agora-managed ASR (Deepgram) in, browser-side Gemini TTS playback out.
+> Agent-side TTS (ElevenLabs / OpenAI) is configurable but currently muted in favor of browser Gemini TTS.
 
 ---
 
@@ -12,17 +14,23 @@ The core product feature. A full-screen dark-themed call interface where franchi
 ### How it works
 
 ```
-User speaks → Agora ASR (Deepgram) → text → Gemini 2.5 Flash → response text → ElevenLabs TTS → audio → User hears Maya
+User speaks → Agora ASR (Deepgram) → text → /api/llm proxy → Gemini 2.5 Flash → response text
+            → transcript poll picks up Maya's reply → browser POSTs text to /api/tts → Gemini TTS (WAV) → User hears Maya
 ```
+
+> The browser **disables remote RTC audio playback** and instead synthesizes Maya's voice itself by
+> sending each new assistant transcript line to `/api/tts` (Gemini TTS). The agent join payload still
+> configures an agent-side TTS vendor (ElevenLabs by default, OpenAI optional), but that audio is not
+> played in the current browser flow.
 
 ### Sub-features
 
 | Feature | Description |
 |---|---|
-| **Push-to-talk (PTT)** | Mic is muted by default. User holds the PTT button or spacebar to speak. Release sends the utterance. Prevents accidental interruptions while Maya is talking. |
-| **Animated voice orb** | Central orb with 18 wave bars that react to the user's mic volume level in real time (80ms polling interval). Visual states: idle, connecting, live, ending. |
+| **Push-to-talk (PTT)** | Mic is muted by default. User holds the PTT button, presses-and-holds the spacebar, or touches-and-holds on mobile to speak. Release re-mutes. Starts muted so Maya can greet without being interrupted. |
 | **Live transcript panel** | Polls `/api/recent-rag` every 1.5 seconds. Displays timestamped, color-coded turns (You = blue, Maya = green). Up to 40 entries. |
-| **Auto-subscribe to agent audio** | Browser automatically subscribes to Maya's RTC audio track when she joins the channel and starts publishing. |
+| **Browser-side Gemini TTS playback** | When a new assistant line lands in the transcript, the browser debounces ~300ms, POSTs the text to `/api/tts`, and plays the returned WAV via an `Audio` element. An `AbortController` cancels in-flight TTS when a newer line arrives so Maya never talks over herself. Remote RTC audio is subscribed but **playback is intentionally disabled** to avoid duplicate/agent-side voice. |
+| **Animated voice orb (rings + ripples)** | Concentric orb rings, SVG ripple paths, and a 56-bar waveform driven by the live mic volume meter (48ms interval). State-styled: idle / connecting / live / ending. |
 | **Post-call lead extraction** | When the user clicks "End Call", the app stops the agent, then sends the full transcript to `/api/summary` which extracts a structured lead record via Gemini JSON mode. |
 | **String UID parity** | Both browser and agent join the Agora channel with string UIDs (`enable_string_uid: true`) to avoid subscribe failures from UID type mismatch. |
 | **Error states** | Displays connection errors, missing env vars, and agent start failures inline. |
@@ -64,9 +72,17 @@ Maya is a Gemini-powered franchise sales representative with a structured person
 
 Each brand has: strong provinces, trend/location/risk signals, sales pitch, and trending flag.
 
+### Agent wiring (Agora ConvoAI v2 join)
+
+- **LLM:** points at the app's own `/api/llm/chat/completions` proxy (OpenAI-compatible) with `LLM_PROXY_SECRET`, `max_history: 32`, non-streaming. Channel is passed via query string so insights route back to the right session.
+- **ASR:** Agora-managed default (Deepgram), `ASR_LANGUAGE` (default `en-US`).
+- **TTS:** vendor block switches on `TTS_VENDOR` — **ElevenLabs** (default, `eleven_flash_v2_5`, WebSocket) or **OpenAI** (`gpt-4o-mini-tts`). `idle_timeout: 180s`.
+- Greeting + failure messages are fixed strings (`ARA_GREETING`, `ARA_FAILURE_MESSAGE`).
+
 ### Files
 
-- `src/lib/sales-prompt.ts` — System prompt builder with catalog injection
+- `src/lib/sales-prompt.ts` — System prompt builder with catalog injection, greeting/failure strings
+- `src/lib/agora-convoai.ts` — ConvoAI join/query/leave REST calls, LLM + ASR + TTS payload assembly
 - `src/lib/mock-data.ts` — Franchise catalog data (3 brands, 5 seed leads)
 
 ---
@@ -132,6 +148,8 @@ Admin view for franchisors to monitor incoming leads and pipeline health.
 | Component | Description |
 |---|---|
 | **Stat grid** (3 cards) | Total Leads, High-Intent (Score > 80), Total Contract Value. Navy accent card with decorative blur. |
+| **Pipeline summary** | Live (5s polling) derived metrics: active pipeline value (sum of budgets, formatted ₱M/₱K), avg AI score, high-intent count (score ≥ 80), OFW vs local split, and a stage-distribution bar chart (New / In consultation / High intent / Hot) with a gold sparkline. Computed client-side from `/api/leads`. |
+| **Live voice insights stream** | Live (5s polling) feed that mines every lead for Maya's **match rationale**, **market signals**, and **risk flags**, rendering each as a quoted insight card with tone tag, AI score, investor, brand, and region. Skeleton + empty states included. |
 | **Geographic intent map** | Stylized Philippines map with atmosphere gradients. Province tags (Cebu, Pampanga) with gold/green dots. |
 | **Package performance bars** | Horizontal bar chart showing franchise category interest distribution (Express Food Cart 42%, Pharma-Tech 28%, etc.). |
 | **Recent leads table** | Live-polling table (every 5 seconds via `/api/leads`). Shows investor name, customer type pill, AI score with progress bar, industry, stage pill, last activity, and action button. |
@@ -140,6 +158,8 @@ Admin view for franchisors to monitor incoming leads and pipeline health.
 
 - `src/app/dashboard/page.tsx`
 - `src/components/dashboard/DashboardStatGrid.tsx`
+- `src/components/dashboard/PipelineSummary.tsx`
+- `src/components/dashboard/LiveInsightsStream.tsx`
 - `src/components/dashboard/GeographicIntentCard.tsx`
 - `src/components/dashboard/PackagePerformanceCard.tsx`
 - `src/components/dashboard/RecentLeadsTable.tsx`
@@ -177,13 +197,20 @@ Public-facing page for franchise buyers.
 
 ### Sections
 
-1. **Hero** — Eyebrow ("Voice AI franchise sales agent"), headline ("Find your best-fit Philippine franchise in one short voice call"), body copy, two CTAs: "Talk to Ara" → `/call`, "Open franchisor view" → `/dashboard`.
-2. **3-step strip** — Qualify (budget, province, style, timeline, OFW), Recommend (one franchise explained), Handoff (structured scored lead to franchisor).
-3. **Footer** — Copyright, nav links to `/call`, `/dashboard`, `/leads`.
+1. **Hero** — Live-voice eyebrow with pulse dot, headline ("Find your best-fit Philippine franchise in one short voice call"), lede, CTAs "Talk to Ara" → `/call` and "See franchisor dashboard" → `/dashboard`, plus an outcome metrics row (avg call 4m12s, qualified rate 72%, lead handoff < 60s). Paired with an asymmetric `HeroVisual` collage (portrait card, floating "live call" stat card with animated waveform, ratings chip, backdrop blob; placeholder imagery via picsum.photos).
+2. **Partner logo strip** — "Trusted by emerging Philippine franchisors" with inline-SVG fictional brand marks (KargaBites, BrewBay, LabaGo, …) that inherit CSS color.
+3. **How it works** (`#how`) — 3-step visual section (Qualify → Recommend → Handoff) built with pure CSS + inline SVG animation (animateMotion / dash drawing), no client JS.
+4. **Dashboard preview** (`#franchisors`) — Browser-chrome framed mock of the franchisor view: sample scored lead rows, geo card, and a category score chart, communicating "every call ends as a scored lead, not a wall of audio."
+5. **CTA band** — Dark closing band, "One call. One franchise. One scored lead." with "Start a voice session" / "Open the dashboard" CTAs.
+6. **Footer** — Copyright, nav links to `/call`, `/dashboard`, `/leads`.
 
 ### Files
 
 - `src/app/page.tsx`
+- `src/components/landing/HeroVisual.tsx`
+- `src/components/landing/PartnerLogoStrip.tsx`
+- `src/components/landing/HowItWorks.tsx`
+- `src/components/landing/DashboardPreview.tsx`
 
 ---
 
@@ -203,7 +230,7 @@ Public-facing page for franchise buyers.
 
 ---
 
-## 8. API Routes (8 endpoints)
+## 8. API Routes (10 endpoints)
 
 | Method | Route | Purpose |
 |---|---|---|
@@ -211,9 +238,10 @@ Public-facing page for franchise buyers.
 | POST | `/api/agent/start` | Creates agent RTC token, calls Agora ConvoAI v2 join. Registers channel session in runtime store. Returns `agentId`. |
 | POST | `/api/agent/stop` | Calls Agora ConvoAI leave. Clears channel session. |
 | GET | `/api/agent/status` | Queries agent status from Agora REST API. Debug/monitoring endpoint. |
-| POST | `/api/llm/chat/completions` | OpenAI-compatible LLM proxy. Agora ConvoAI calls this URL. Routes to Gemini 2.5 Flash. Records user utterances and assistant responses to runtime store. Supports both streaming (SSE) and non-streaming modes. Bearer auth with `LLM_PROXY_SECRET`. |
+| POST | `/api/llm/chat/completions` | OpenAI-compatible LLM proxy. Agora ConvoAI calls this URL. Routes to Gemini 2.5 Flash. De-dupes ASR partials, records user utterances and assistant responses to runtime store. Supports both streaming (SSE) and non-streaming modes. Accepts `Authorization: Bearer`, bare `Authorization`, `api-key`, or `x-api-key` against `LLM_PROXY_SECRET`. |
+| POST | `/api/tts` | Browser TTS endpoint. Sends text to Gemini TTS (`gemini-2.5-flash-preview-tts`), decodes the base64 PCM, wraps it in a 24kHz mono WAV header, and returns `audio/wav`. Retries once on 5xx. |
 | GET | `/api/recent-rag` | Returns last 40 transcript entries for a given channel. Used by the live transcript panel. |
-| POST | `/api/summary` | Sends transcript to Gemini JSON mode. Extracts structured lead. Persists via `upsertLead`. |
+| POST | `/api/summary` | Sends transcript to Gemini JSON mode. Extracts structured lead. Persists via `upsertLead`. Distinguishes parse failures (422) from generation failures (500). |
 | GET | `/api/leads` | Returns all leads from runtime store. Used by dashboard and leads page polling. |
 | GET | `/api/leads/[id]` | Returns a single lead by ID. |
 
@@ -234,8 +262,9 @@ In-memory store using `globalThis` for persistence across hot reloads during dev
 
 ### Transcript recording logic
 
-- `appendUserUtterance(channel, content)` — Adds a new user entry.
-- `appendAssistantToken(channel, token)` — Appends to the last assistant entry if within 4 seconds, otherwise creates a new entry. Handles streaming token accumulation.
+- `appendUserUtterance(channel, content)` — De-dupes Agora's incremental ASR partials: ignores exact repeats and strips the already-seen prefix so each utterance is appended once cleanly.
+- `appendAssistantMessage(channel, content)` — Appends a full assistant turn (used by the LLM proxy for both streaming and non-streaming completions).
+- `appendAssistantToken(channel, token)` — Token-accumulation variant: appends to the last assistant entry if within 4 seconds, otherwise starts a new entry.
 
 ### File
 
@@ -283,7 +312,7 @@ In-memory store using `globalThis` for persistence across hot reloads during dev
 
 ## 11. Environment Configuration
 
-14 environment variables. 8 required, 6 optional with defaults.
+Server vars are validated lazily in `src/lib/env.ts` — **9 required**, **13 optional** with defaults. The browser additionally needs `NEXT_PUBLIC_AGORA_APP_ID`.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
@@ -292,15 +321,24 @@ In-memory store using `globalThis` for persistence across hot reloads during dev
 | `AGORA_REST_KEY` | Yes | — | Agora REST API key (Basic auth) |
 | `AGORA_REST_SECRET` | Yes | — | Agora REST API secret |
 | `PUBLIC_BASE_URL` | Yes | — | Publicly reachable URL (ngrok/cloudflare tunnel) for LLM proxy callback |
-| `LLM_PROXY_SECRET` | Yes | — | Bearer token for LLM proxy auth |
-| `GEMINI_API_KEY` | Yes | — | Google AI API key |
-| `ELEVENLABS_API_KEY` | Yes | — | ElevenLabs TTS API key |
+| `LLM_PROXY_SECRET` | Yes | — | Shared secret for LLM proxy auth |
+| `GEMINI_API_KEY` | Yes | — | Google AI API key (LLM, TTS, summarization) |
+| `ELEVENLABS_API_KEY` | Yes | — | ElevenLabs TTS API key (agent-side TTS) |
+| `OPENAI_API_KEY` | Yes | — | OpenAI key (used when `TTS_VENDOR=openai`) |
 | `AGORA_REST_BASE_URL` | No | `https://api.agora.io` | Agora API base |
-| `GEMINI_MODEL` | No | `gemini-2.5-flash` | Which Gemini model to use |
+| `GEMINI_MODEL` | No | `gemini-2.5-flash` | LLM + summarizer model |
+| `GEMINI_TTS_MODEL` | No | `gemini-2.5-flash-preview-tts` | Browser TTS model (`/api/tts`) |
+| `GEMINI_TTS_VOICE` | No | `Kore` | Gemini prebuilt voice name |
+| `GEMINI_TTS_PROMPT` | No | warm PH advisor prompt | Style instruction prepended to TTS text |
 | `ASR_LANGUAGE` | No | `en-US` | Agora ASR language |
-| `TTS_VENDOR` | No | `elevenlabs` | TTS provider |
+| `TTS_VENDOR` | No | `elevenlabs` | Agent-side TTS provider (`elevenlabs` \| `openai`) |
 | `ELEVENLABS_VOICE_ID` | No | `pNInz6obpgDQGcFmaJgB` | ElevenLabs voice (default: Adam) |
 | `ELEVENLABS_MODEL_ID` | No | `eleven_flash_v2_5` | ElevenLabs model |
+| `OPENAI_TTS_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI TTS base URL |
+| `OPENAI_TTS_MODEL` | No | `gpt-4o-mini-tts` | OpenAI TTS model |
+| `OPENAI_TTS_VOICE` | No | `coral` | OpenAI TTS voice |
+| `OPENAI_TTS_INSTRUCTIONS` | No | standard-English tone prompt | OpenAI TTS style instructions |
+| `NEXT_PUBLIC_AGORA_APP_ID` | Yes (client) | — | App ID exposed to the browser for RTC join |
 
 ### File
 

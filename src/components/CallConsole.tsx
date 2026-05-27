@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Image from "next/image";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import KaAsensoLogo from "@/components/shared/KaAsensoLogo";
+import VoiceOrb from "@/components/call/VoiceOrb";
+import LiveWaveform from "@/components/call/LiveWaveform";
 
 type CallState = "idle" | "connecting" | "live" | "ending";
 
@@ -19,7 +21,7 @@ interface CallSession {
   agentId: string;
 }
 
-const WAVE = Array.from({ length: 18 }, (_, i) => i);
+const WAVE_BARS = 56;
 const PUBLIC_APP_ID = process.env.NEXT_PUBLIC_AGORA_APP_ID ?? "";
 
 function fmtTs(ts: number) {
@@ -31,14 +33,18 @@ export default function CallConsole() {
   const [state, setState] = useState<CallState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
-  const [waveLevels, setWaveLevels] = useState<number[]>(() => WAVE.map(() => 14));
+  const [bars, setBars] = useState<number[]>(() => Array.from({ length: WAVE_BARS }, () => 0.06));
+  const [orbEnergy, setOrbEnergy] = useState(0.05);
   const [muted, setMuted] = useState(true); // push-to-talk: muted by default
+  const [callStartedAt, setCallStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState<string>("00:00");
 
   const clientRef = useRef<unknown | null>(null);
   const audioTrackRef = useRef<unknown | null>(null);
   const sessionRef = useRef<CallSession | null>(null);
   const pollRef = useRef<number | null>(null);
   const levelRef = useRef<number | null>(null);
+  const elapsedRef = useRef<number | null>(null);
   const ttsTimerRef = useRef<number | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
   const spokenAssistantRef = useRef<string>("");
@@ -87,6 +93,10 @@ export default function CallConsole() {
       window.clearInterval(levelRef.current);
       levelRef.current = null;
     }
+    if (elapsedRef.current !== null) {
+      window.clearInterval(elapsedRef.current);
+      elapsedRef.current = null;
+    }
     if (ttsTimerRef.current !== null) {
       window.clearTimeout(ttsTimerRef.current);
       ttsTimerRef.current = null;
@@ -101,6 +111,25 @@ export default function CallConsole() {
       void cleanupRtc();
     };
   }, [cleanupRtc, stopPolling]);
+
+  // Elapsed call timer
+  useEffect(() => {
+    if (state !== "live" || !callStartedAt) return;
+    const tick = () => {
+      const secs = Math.floor((Date.now() - callStartedAt) / 1000);
+      const m = Math.floor(secs / 60).toString().padStart(2, "0");
+      const s = (secs % 60).toString().padStart(2, "0");
+      setElapsed(`${m}:${s}`);
+    };
+    tick();
+    elapsedRef.current = window.setInterval(tick, 500);
+    return () => {
+      if (elapsedRef.current !== null) {
+        window.clearInterval(elapsedRef.current);
+        elapsedRef.current = null;
+      }
+    };
+  }, [callStartedAt, state]);
 
   const beginCall = useCallback(async () => {
     if (!PUBLIC_APP_ID) {
@@ -117,7 +146,6 @@ export default function CallConsole() {
     try {
       const channel = `ka-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 
-      // 1. Mint browser RTC token (string UID for parity with agent)
       const tokenRes = await fetch("/api/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -130,7 +158,6 @@ export default function CallConsole() {
         channel: string;
       };
 
-      // 2. Browser joins as publisher
       const { default: AgoraRTC } = await import("agora-rtc-sdk-ng");
       AgoraRTC.setLogLevel(2);
       const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
@@ -146,8 +173,6 @@ export default function CallConsole() {
         console.log("[rtc] user-published", { uid: user.uid, mediaType });
         await client.subscribe(user, mediaType);
         if (mediaType === "audio") {
-          // We render assistant audio through /api/tts in the browser.
-          // Skip remote RTC playback to avoid duplicate/error voice output from agent-side TTS.
           console.log("[rtc] remote audio subscribed (playback disabled)", user.uid);
         }
       });
@@ -155,7 +180,6 @@ export default function CallConsole() {
         console.warn("[rtc] exception", event);
       });
 
-      // agora-rtc-sdk-ng auto-detects: string uid → user account join
       await client.join(PUBLIC_APP_ID, tokenJson.channel, tokenJson.token, tokenJson.uid);
 
       const micTrack = await AgoraRTC.createMicrophoneAudioTrack({
@@ -165,11 +189,9 @@ export default function CallConsole() {
       });
       audioTrackRef.current = micTrack;
       await client.publish([micTrack]);
-      // Push-to-talk: start muted so Maya can greet without being interrupted.
       await micTrack.setMuted(true);
       setMuted(true);
 
-      // 3. Start ConvoAI agent in the same channel
       const startRes = await fetch("/api/agent/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -191,20 +213,28 @@ export default function CallConsole() {
         agentId: startJson.agentId,
       };
 
-      // 4. Local audio level meter -> visual wave bars
+      // Wavy audio meter -> per-bar heights (0..1).
       levelRef.current = window.setInterval(() => {
-        const level = micTrack.getVolumeLevel(); // 0..1
-        setWaveLevels((prev) =>
+        const level = micTrack.getVolumeLevel();
+        const idle = 0.18;
+        const energy = Math.max(idle, Math.min(1, level * 2.4));
+        setOrbEnergy(energy);
+        const now = Date.now();
+        setBars((prev) =>
           prev.map((_, i) => {
-            const distance = Math.abs(i - WAVE.length / 2);
-            const base = 14 + level * 80;
-            const jitter = Math.sin(Date.now() / 120 + i) * 6;
-            return Math.max(8, base - distance * 3 + jitter);
+            const center = WAVE_BARS / 2;
+            const distance = Math.abs(i - center) / center;
+            const taper = Math.cos(distance * Math.PI * 0.5);
+            const fast = Math.sin(now / 90 + i * 0.55) * 0.18 * energy;
+            const slow = Math.sin(now / 260 + i * 0.18) * 0.12;
+            const flutter = Math.sin(now / 50 + i) * 0.06 * energy;
+            const base = 0.18 + energy * 0.78;
+            const value = base * taper + fast + slow + flutter;
+            return Math.max(0.04, Math.min(1, value));
           }),
         );
-      }, 80);
+      }, 48);
 
-      // 5. Poll transcript
       pollRef.current = window.setInterval(async () => {
         const channelToPoll = sessionRef.current?.channel;
         if (!channelToPoll) return;
@@ -220,6 +250,7 @@ export default function CallConsole() {
         }
       }, 1500);
 
+      setCallStartedAt(Date.now());
       setState("live");
     } catch (err) {
       const message = err instanceof Error ? err.message : "unknown_error";
@@ -270,17 +301,23 @@ export default function CallConsole() {
       }
     }
 
+    setCallStartedAt(null);
+    setElapsed("00:00");
     setState("idle");
   }, [cleanupRtc, stopPolling]);
 
-  const cta = useMemo(() => {
-    if (state === "idle") return { label: "Start Call", action: beginCall };
-    if (state === "connecting") return { label: "Connecting…", action: () => {} };
-    if (state === "live") return { label: "End Call", action: endCall };
-    return { label: "Wrapping up…", action: () => {} };
-  }, [beginCall, endCall, state]);
+  const isLive = state === "live";
+  const isConnecting = state === "connecting";
+  const isEnding = state === "ending";
+  const ctaLabel = isLive
+    ? "End call"
+    : isConnecting
+      ? "Connecting…"
+      : isEnding
+        ? "Wrapping up…"
+        : "Start call";
+  const ctaAction = isLive ? endCall : isConnecting || isEnding ? () => {} : beginCall;
 
-  // Push-to-talk handlers
   const pttDown = useCallback(() => {
     if (state !== "live") return;
     void setMicMuted(false);
@@ -311,9 +348,7 @@ export default function CallConsole() {
       const url = URL.createObjectURL(blob);
       const nextAudio = new Audio(url);
       const prevAudio = browserAudioRef.current;
-      if (prevAudio) {
-        prevAudio.pause();
-      }
+      if (prevAudio) prevAudio.pause();
       browserAudioRef.current = nextAudio;
       nextAudio.onended = () => URL.revokeObjectURL(url);
       nextAudio.onerror = () => URL.revokeObjectURL(url);
@@ -335,16 +370,13 @@ export default function CallConsole() {
     const key = `${latestAssistant.ts}:${latestAssistant.content}`;
     if (spokenAssistantRef.current === key) return;
     spokenAssistantRef.current = key;
-    if (ttsTimerRef.current !== null) {
-      window.clearTimeout(ttsTimerRef.current);
-    }
+    if (ttsTimerRef.current !== null) window.clearTimeout(ttsTimerRef.current);
     ttsTimerRef.current = window.setTimeout(() => {
       ttsTimerRef.current = null;
       void speakAssistant(latestAssistant.content);
     }, 300);
   }, [speakAssistant, state, transcript]);
 
-  // Spacebar push-to-talk
   useEffect(() => {
     if (state !== "live") return;
     function onKeyDown(e: KeyboardEvent) {
@@ -367,89 +399,145 @@ export default function CallConsole() {
     };
   }, [setMicMuted, state]);
 
+  const statusLabel =
+    state === "idle"
+      ? error
+        ? `Error · ${error}`
+        : "Tap to start voice chat"
+      : state === "connecting"
+        ? "Connecting to Ara…"
+        : state === "live"
+          ? muted
+            ? "Hold space to talk · Ara is listening"
+            : "Listening · release to send"
+          : "Wrapping up and saving lead…";
+
   return (
-    <section className="call-stage" aria-label="Voice console with Maya">
-      <header className="call-stage-head">
-        <Link href="/" className="ka-logo">
-          <Image
-            src="/brand-logo.png"
-            alt="Ka Asenso"
-            width={70}
-            height={55}
-            className="ka-logo-mark"
-          />
-          <span className="ka-logo-word">KaAsenso</span>
-        </Link>
-        <Link href="/dashboard" className="button button-ghost-dark">
-          Franchisor dashboard
-        </Link>
+    <div className="el-call">
+      {/* Decorative dot grid + radial vignette painted by .el-call::before / ::after */}
+      <header className="el-call-top">
+        <KaAsensoLogo invert />
+        <div className="el-call-top-meta">
+          <span className={`el-pill el-pill-${state}`}>
+            <span className="el-pill-dot" aria-hidden="true" />
+            {state === "live" ? "Live" : state === "connecting" ? "Connecting" : state === "ending" ? "Ending" : "Idle"}
+          </span>
+          {state === "live" ? <span className="el-elapsed" aria-live="polite">{elapsed}</span> : null}
+          <Link href="/dashboard" className="el-ghost-link">
+            Franchisor dashboard
+          </Link>
+        </div>
       </header>
 
-      <div className="call-stage-body">
-        <div className={`call-orb call-orb-${state}`} aria-hidden="true">
-          <div className="call-orb-core" />
-          <div className="call-orb-wave">
-            {waveLevels.map((height, i) => (
-              <span key={i} className="wave-bar" style={{ height: `${height}px` }} />
-            ))}
+      <section className="el-call-stage" aria-label="Voice console with Ara">
+        <VoiceOrb energy={orbEnergy} state={state} />
+
+        <div className="el-agent-card">
+          <div className="el-agent-meta">
+            <div className="el-agent-name">Ara · Franchise advisor</div>
+            <div className="el-agent-sub">{statusLabel}</div>
           </div>
+
+          <button
+            type="button"
+            className={isLive ? "el-call-btn is-danger" : "el-call-btn"}
+            onClick={ctaAction}
+            disabled={isConnecting || isEnding}
+            aria-label={ctaLabel}
+          >
+            {isLive ? <HangupIcon /> : <PhoneIcon />}
+          </button>
         </div>
-
-        <p className="call-status">
-          {state === "idle" && (error ? `Error: ${error}` : "Press start to talk to Maya.")}
-          {state === "connecting" && "Connecting to Maya…"}
-          {state === "live" && "Maya is listening."}
-          {state === "ending" && "Wrapping up and saving lead…"}
-        </p>
-
-        <button
-          type="button"
-          className="button button-primary call-cta"
-          onClick={cta.action}
-          disabled={state === "connecting" || state === "ending"}
-        >
-          {cta.label}
-        </button>
 
         {state === "live" ? (
           <button
             type="button"
-            className={muted ? "ptt-button" : "ptt-button is-active"}
+            className={`el-ptt${muted ? "" : " is-active"}`}
             onMouseDown={pttDown}
             onMouseUp={pttUp}
             onMouseLeave={pttUp}
-            onTouchStart={(e) => { e.preventDefault(); pttDown(); }}
-            onTouchEnd={(e) => { e.preventDefault(); pttUp(); }}
+            onTouchStart={(e) => {
+              e.preventDefault();
+              pttDown();
+            }}
+            onTouchEnd={(e) => {
+              e.preventDefault();
+              pttUp();
+            }}
             aria-pressed={!muted}
           >
-            <span className="ptt-dot" aria-hidden="true" />
-            {muted ? "Hold to talk (or Space)" : "Listening… release to send"}
+            <MicIcon active={!muted} />
+            <span>{muted ? "Hold to talk" : "Speaking"}</span>
+            <kbd>Space</kbd>
           </button>
         ) : null}
 
-        <div className="transcript-card" aria-live="polite">
-          <header className="transcript-head">
-            <h2>Live Transcript</h2>
-            <span className={state === "live" ? "pill tone-green" : "pill tone-slate"}>
-              {state === "live" ? "Recording" : "Idle"}
-            </span>
-          </header>
-          <ul className="transcript-feed">
-            {transcript.length === 0 ? (
-              <li className="transcript-empty">
-                Conversation appears here once the call begins.
-              </li>
-            ) : null}
+        <div className="el-waveform-shell" aria-hidden="true">
+          <LiveWaveform bars={bars} active={state === "live"} />
+        </div>
+      </section>
+
+      <section className="el-transcript" aria-live="polite" aria-label="Live transcript">
+        <header className="el-transcript-head">
+          <h2>Transcript</h2>
+          <span className={`el-pill el-pill-mini el-pill-${state === "live" ? "live" : "idle"}`}>
+            <span className="el-pill-dot" aria-hidden="true" />
+            {state === "live" ? "Recording" : "Idle"}
+          </span>
+        </header>
+        {transcript.length === 0 ? (
+          <p className="el-transcript-empty">
+            Conversation appears here as you and Ara speak. Hold <kbd>Space</kbd> to reply.
+          </p>
+        ) : (
+          <ul className="el-transcript-feed">
             {transcript.map((line, i) => (
-              <li key={i} className={`transcript-line who-${line.role === "user" ? "you" : "ara"}`}>
-                <span className="transcript-ts">{fmtTs(line.ts)}</span>
-                <span className="transcript-who">{line.role === "user" ? "You" : "Maya"}</span>
-                <span className="transcript-text">{line.content}</span>
+              <li key={i} className={`el-line el-line-${line.role}`}>
+                <span className="el-line-who">{line.role === "user" ? "You" : "Ara"}</span>
+                <span className="el-line-text">{line.content}</span>
+                <span className="el-line-ts">{fmtTs(line.ts)}</span>
               </li>
             ))}
           </ul>
-        </div>
-      </div>
-    </section>
+        )}
+      </section>
+    </div>
+  );
+}
+
+/* ──────────────────────────  inline icons  ───────────────────────── */
+
+function PhoneIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">
+      <path
+        d="M5.5 4.5C5.5 4 5.9 3.5 6.4 3.5h2.4c.5 0 .9.3 1 .8l.9 3.4c.1.4-.1.9-.5 1.1l-1.6.8c1 2.1 2.7 3.8 4.8 4.8l.8-1.6c.2-.4.7-.6 1.1-.5l3.4.9c.5.1.8.5.8 1v2.4c0 .5-.5.9-1 .9-7.7 0-14-6.3-14-14z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function HangupIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">
+      <path
+        d="M3.5 11.4c4.7-3.5 12.3-3.5 17 0 1 .8 1 2.3 0 3.1l-1.7 1.4c-.7.6-1.7.5-2.4-.1l-1.4-1.3a1.7 1.7 0 0 1-.5-1.2v-1.6c-1.9-.6-4-.6-5.9 0v1.6c0 .5-.2.9-.5 1.2l-1.4 1.3c-.6.6-1.7.7-2.4.1L3.5 14.5c-1-.8-1-2.3 0-3.1z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function MicIcon({ active }: { active: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" strokeWidth="1.6" fill={active ? "currentColor" : "none"} />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
   );
 }

@@ -4,20 +4,40 @@ import Link from "next/link";
 interface KaAsensoLogoProps {
   href?: string;
   compact?: boolean;
+  /**
+   * When the logo sits on a dark background (e.g. /call), the wordmark needs
+   * a bit of glow to keep contrast.
+   */
+  invert?: boolean;
 }
 
-export default function KaAsensoLogo({ href = "/", compact = false }: KaAsensoLogoProps) {
+/**
+ * Full Ka Asenso wordmark.
+ * Source: /public/new_logo.png (1920x1080 — the artwork is the single mark + text).
+ */
+export default function KaAsensoLogo({
+  href = "/",
+  compact = false,
+  invert = false,
+}: KaAsensoLogoProps) {
+  const className = [
+    "ka-logo",
+    compact ? "ka-logo-compact" : "",
+    invert ? "ka-logo-invert" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <Link href={href} className="ka-logo" aria-label="Ka Asenso home">
+    <Link href={href} className={className} aria-label="Ka Asenso home">
       <Image
-        src="/brand-logo.png"
+        src="/new_logo.png"
         alt="Ka Asenso"
-        width={70}
-        height={55}
+        width={1920}
+        height={1080}
         priority
-        className={compact ? "ka-logo-mark compact" : "ka-logo-mark"}
+        className="ka-logo-wordmark"
       />
-      {!compact ? <span className="ka-logo-word">KaAsenso</span> : null}
     </Link>
   );
 }
