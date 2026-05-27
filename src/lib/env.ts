@@ -38,6 +38,18 @@ export const env = {
   get geminiModel() {
     return readOptional("GEMINI_MODEL", "gemini-2.5-flash");
   },
+  get geminiTtsModel() {
+    return readOptional("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts");
+  },
+  get geminiTtsVoice() {
+    return readOptional("GEMINI_TTS_VOICE", "Kore");
+  },
+  get geminiTtsPrompt() {
+    return readOptional(
+      "GEMINI_TTS_PROMPT",
+      "Say in a warm, clear, helpful Philippine franchise advisor voice:",
+    );
+  },
   get asrLanguage() {
     return readOptional("ASR_LANGUAGE", "en-US");
   },
