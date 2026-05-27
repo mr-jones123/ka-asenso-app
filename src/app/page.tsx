@@ -1,8 +1,14 @@
 import Link from "next/link";
 import TopNav from "@/components/shared/TopNav";
+import HeroVisual from "@/components/landing/HeroVisual";
+import HowItWorks from "@/components/landing/HowItWorks";
+import PartnerLogoStrip from "@/components/landing/PartnerLogoStrip";
+import DashboardPreview from "@/components/landing/DashboardPreview";
 
 const NAV = [
-  { label: "Discover Franchises", href: "#discover" },
+  { label: "How it works", href: "#how" },
+  { label: "Franchisors", href: "#franchisors" },
+  { label: "Dashboard", href: "/dashboard" },
 ];
 
 export default function Home() {
@@ -10,52 +16,106 @@ export default function Home() {
     <div className="customer-shell">
       <TopNav
         navItems={NAV}
-        activeHref="#discover"
-        ctaLabel="Invest"
+        activeHref="#how"
+        ctaLabel="Talk to Ara"
         ctaHref="/call"
         compactNav
       />
 
       <main className="customer-main">
-        <section className="customer-hero" aria-labelledby="hero-title">
-          <p className="customer-eyebrow">Voice AI franchise sales agent</p>
-          <h1 id="hero-title" className="customer-headline">
-            Find your best-fit Philippine franchise in one short voice call.
-          </h1>
-          <p className="customer-lede">
-            Ka Asenso qualifies your budget, location, and management style, recommends one franchise that matches your profile, and routes a structured lead to the franchisor.
-          </p>
-          <div className="customer-actions">
-            <Link href="/call" className="button button-primary">
-              Talk to Ara
-            </Link>
-            <Link href="/dashboard" className="button button-ghost">
-              Open franchisor view
-            </Link>
+        {/* ── HERO ─────────────────────────────────────────────── */}
+        <section className="hero-grid" aria-labelledby="hero-title">
+          <div className="hero-copy">
+            <p className="customer-eyebrow">
+              <span className="hero-pulse" aria-hidden="true" />
+              Live voice AI · Tagalog and English
+            </p>
+            <h1 id="hero-title" className="hero-headline">
+              Find your best-fit Philippine franchise{" "}
+              <span className="hero-accent">in one short voice call.</span>
+            </h1>
+            <p className="hero-lede">
+              Ka Asenso qualifies your budget, location, and management style, recommends one
+              franchise that actually matches your profile, and ships a structured lead to the
+              franchisor before you even hang up.
+            </p>
+            <div className="customer-actions">
+              <Link href="/call" className="button button-primary hero-cta">
+                Talk to Ara
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <path
+                    d="M3 8h9m0 0L8 4m4 4L8 12"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </Link>
+              <Link href="/dashboard" className="button button-ghost">
+                See franchisor dashboard
+              </Link>
+            </div>
+
+            <dl className="hero-metrics" aria-label="Outcome metrics">
+              <div>
+                <dt>Average call</dt>
+                <dd>4m 12s</dd>
+              </div>
+              <div>
+                <dt>Qualified rate</dt>
+                <dd>72%</dd>
+              </div>
+              <div>
+                <dt>Lead handoff</dt>
+                <dd>&lt; 60s</dd>
+              </div>
+            </dl>
           </div>
+
+          <HeroVisual />
         </section>
 
-        <section id="discover" className="customer-strip" aria-label="What Ara does">
-          <article>
-            <span className="customer-strip-num">01</span>
-            <h2>Qualify</h2>
-            <p>Budget, province, management style, timeline, OFW status.</p>
-          </article>
-          <article>
-            <span className="customer-strip-num">02</span>
-            <h2>Recommend</h2>
-            <p>One franchise out of the catalog. Explained in plain language.</p>
-          </article>
-          <article>
-            <span className="customer-strip-num">03</span>
-            <h2>Handoff</h2>
-            <p>Structured, scored lead sent to the franchisor dashboard.</p>
-          </article>
+        <PartnerLogoStrip />
+
+        {/* ── HOW IT WORKS ─────────────────────────────────────── */}
+        <div id="how">
+          <HowItWorks />
+        </div>
+
+        {/* ── DASHBOARD PREVIEW ────────────────────────────────── */}
+        <div id="franchisors">
+          <DashboardPreview />
+        </div>
+
+        {/* ── CTA BAND ─────────────────────────────────────────── */}
+        <section className="cta-band" aria-label="Start your franchise journey">
+          <div className="cta-band-inner">
+            <div>
+              <p className="customer-eyebrow on-dark">Ready when you are</p>
+              <h2 className="cta-band-title">
+                One call. One franchise. One scored lead.
+              </h2>
+              <p className="cta-band-lede">
+                Whether you’re a returning OFW, a hands-on operator, or a franchisor sourcing
+                qualified buyers, Ka Asenso runs the discovery loop for you.
+              </p>
+            </div>
+            <div className="cta-band-actions">
+              <Link href="/call" className="button button-success">
+                Start a voice session
+              </Link>
+              <Link href="/dashboard" className="button button-ghost-dark">
+                Open the dashboard
+              </Link>
+            </div>
+          </div>
         </section>
       </main>
 
       <footer className="customer-footer">
-        <span>© 2026 Ka Asenso</span>
+        <span>© 2026 Ka Asenso · Voice-first franchise discovery</span>
         <nav aria-label="Footer">
           <Link href="/call">Talk to Ara</Link>
           <Link href="/dashboard">Dashboard</Link>
