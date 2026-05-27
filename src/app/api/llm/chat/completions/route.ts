@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { env } from "@/lib/env";
-import { appendAssistantToken, appendUserUtterance } from "@/lib/runtime-store";
+import { appendAssistantMessage, appendUserUtterance } from "@/lib/runtime-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -58,19 +58,40 @@ function extractChannel(req: OpenAiRequest, request: Request): string {
 function toGeminiHistory(messages: OpenAiMessage[]) {
   const systemBits: string[] = [];
   const turns: { role: "user" | "model"; parts: { text: string }[] }[] = [];
+  let previousUserContent = "";
 
   for (const msg of messages) {
     if (msg.role === "system" || msg.role === "developer") {
       systemBits.push(msg.content);
       continue;
     }
+    const content =
+      msg.role === "user" ? extractNewUserContent(msg.content, previousUserContent) : msg.content;
+    if (msg.role === "user") {
+      previousUserContent = msg.content;
+    }
+    if (!content) continue;
     turns.push({
       role: msg.role === "assistant" ? "model" : "user",
-      parts: [{ text: msg.content }],
+      parts: [{ text: content }],
     });
   }
 
   return { systemInstruction: systemBits.join("\n\n").trim(), turns };
+}
+
+function normalizeSpeechText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function extractNewUserContent(content: string, previousContent: string): string {
+  const current = normalizeSpeechText(content);
+  const previous = normalizeSpeechText(previousContent);
+  if (!current) return "";
+  if (previous && current.toLowerCase().startsWith(previous.toLowerCase())) {
+    return current.slice(previous.length).replace(/^[\s.,!?;:-]+/, "").trim();
+  }
+  return current;
 }
 
 export async function POST(request: Request) {
@@ -116,7 +137,7 @@ export async function POST(request: Request) {
     systemInstruction: systemInstruction || undefined,
     generationConfig: {
       temperature: 0.7,
-      maxOutputTokens: 320,
+      maxOutputTokens: 640,
     },
   });
 
@@ -126,7 +147,10 @@ export async function POST(request: Request) {
     try {
       const result = await model.generateContent({ contents: turns });
       const text = result.response.text();
-      appendAssistantToken(channel, text);
+      const finishReason = result.response.candidates?.[0]?.finishReason;
+      if (text && finishReason !== "MAX_TOKENS") {
+        appendAssistantMessage(channel, text);
+      }
       return new Response(
         JSON.stringify({
           id,
@@ -137,7 +161,7 @@ export async function POST(request: Request) {
             {
               index: 0,
               message: { role: "assistant", content: text },
-              finish_reason: "stop",
+              finish_reason: finishReason === "MAX_TOKENS" ? "length" : "stop",
             },
           ],
         }),
@@ -155,6 +179,7 @@ export async function POST(request: Request) {
   const encoder = new TextEncoder();
   const sseStream = new ReadableStream({
     async start(controller) {
+      let assistantText = "";
       try {
         // OpenAI streaming contract: first chunk announces the assistant role.
         controller.enqueue(
@@ -165,10 +190,13 @@ export async function POST(request: Request) {
         for await (const chunk of result.stream) {
           const text = chunk.text();
           if (!text) continue;
-          appendAssistantToken(channel, text);
+          assistantText += text;
           controller.enqueue(
             encoder.encode(sseChunk(makeChunk(id, requestedModel, { content: text }, null))),
           );
+        }
+        if (assistantText.trim()) {
+          appendAssistantMessage(channel, assistantText);
         }
         controller.enqueue(
           encoder.encode(sseChunk(makeChunk(id, requestedModel, {}, "stop"))),

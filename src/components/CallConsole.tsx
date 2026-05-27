@@ -39,6 +39,10 @@ export default function CallConsole() {
   const sessionRef = useRef<CallSession | null>(null);
   const pollRef = useRef<number | null>(null);
   const levelRef = useRef<number | null>(null);
+  const ttsTimerRef = useRef<number | null>(null);
+  const ttsAbortRef = useRef<AbortController | null>(null);
+  const spokenAssistantRef = useRef<string>("");
+  const browserAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const setMicMuted = useCallback(async (next: boolean) => {
     const track = audioTrackRef.current as { setMuted?: (m: boolean) => Promise<void> | void } | null;
@@ -83,6 +87,12 @@ export default function CallConsole() {
       window.clearInterval(levelRef.current);
       levelRef.current = null;
     }
+    if (ttsTimerRef.current !== null) {
+      window.clearTimeout(ttsTimerRef.current);
+      ttsTimerRef.current = null;
+    }
+    ttsAbortRef.current?.abort();
+    ttsAbortRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -102,6 +112,7 @@ export default function CallConsole() {
     setError(null);
     setState("connecting");
     setTranscript([]);
+    spokenAssistantRef.current = "";
 
     try {
       const channel = `ka-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
@@ -135,8 +146,9 @@ export default function CallConsole() {
         console.log("[rtc] user-published", { uid: user.uid, mediaType });
         await client.subscribe(user, mediaType);
         if (mediaType === "audio") {
-          user.audioTrack?.play();
-          console.log("[rtc] audio playback started for", user.uid);
+          // We render assistant audio through /api/tts in the browser.
+          // Skip remote RTC playback to avoid duplicate/error voice output from agent-side TTS.
+          console.log("[rtc] remote audio subscribed (playback disabled)", user.uid);
         }
       });
       client.on("exception", (event) => {
@@ -224,6 +236,12 @@ export default function CallConsole() {
     const session = sessionRef.current;
     sessionRef.current = null;
 
+    const audio = browserAudioRef.current;
+    if (audio) {
+      audio.pause();
+      browserAudioRef.current = null;
+    }
+
     await cleanupRtc();
 
     if (session) {
@@ -271,6 +289,60 @@ export default function CallConsole() {
     if (state !== "live") return;
     void setMicMuted(true);
   }, [setMicMuted, state]);
+
+  const speakAssistant = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+    ttsAbortRef.current?.abort();
+    const controller = new AbortController();
+    ttsAbortRef.current = controller;
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        console.warn("tts", res.status, body.slice(0, 160));
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const nextAudio = new Audio(url);
+      const prevAudio = browserAudioRef.current;
+      if (prevAudio) {
+        prevAudio.pause();
+      }
+      browserAudioRef.current = nextAudio;
+      nextAudio.onended = () => URL.revokeObjectURL(url);
+      nextAudio.onerror = () => URL.revokeObjectURL(url);
+      await nextAudio.play();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      console.warn("speakAssistant", err);
+    } finally {
+      if (ttsAbortRef.current === controller) {
+        ttsAbortRef.current = null;
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (state !== "live") return;
+    const latestAssistant = [...transcript].reverse().find((line) => line.role === "assistant");
+    if (!latestAssistant) return;
+    const key = `${latestAssistant.ts}:${latestAssistant.content}`;
+    if (spokenAssistantRef.current === key) return;
+    spokenAssistantRef.current = key;
+    if (ttsTimerRef.current !== null) {
+      window.clearTimeout(ttsTimerRef.current);
+    }
+    ttsTimerRef.current = window.setTimeout(() => {
+      ttsTimerRef.current = null;
+      void speakAssistant(latestAssistant.content);
+    }, 300);
+  }, [speakAssistant, state, transcript]);
 
   // Spacebar push-to-talk
   useEffect(() => {

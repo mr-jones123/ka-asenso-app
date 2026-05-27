@@ -17,6 +17,7 @@ interface TranscriptEntry {
 interface InsightsState {
   transcript: TranscriptEntry[];
   lastAssistantTokenAt: number | null;
+  lastUserSourceContent: string | null;
   channel: string;
 }
 
@@ -53,6 +54,7 @@ export function registerChannel(channel: string, session: ChannelSession) {
     runtime.insights.set(channel, {
       transcript: [],
       lastAssistantTokenAt: null,
+      lastUserSourceContent: null,
       channel,
     });
   }
@@ -69,7 +71,7 @@ export function clearChannel(channel: string) {
 export function getInsights(channel: string): InsightsState {
   let entry = runtime.insights.get(channel);
   if (!entry) {
-    entry = { transcript: [], lastAssistantTokenAt: null, channel };
+    entry = { transcript: [], lastAssistantTokenAt: null, lastUserSourceContent: null, channel };
     runtime.insights.set(channel, entry);
   }
   return entry;
@@ -77,7 +79,28 @@ export function getInsights(channel: string): InsightsState {
 
 export function appendUserUtterance(channel: string, content: string) {
   const insights = getInsights(channel);
-  insights.transcript.push({ role: "user", content, ts: Date.now() });
+  const normalizedSource = content.replace(/\s+/g, " ").trim();
+  if (!normalizedSource) return;
+
+  const previousSource = insights.lastUserSourceContent ?? "";
+  insights.lastUserSourceContent = normalizedSource;
+
+  let normalized = normalizedSource;
+  if (previousSource && normalizedSource.toLowerCase() === previousSource.toLowerCase()) {
+    return;
+  }
+  if (previousSource && normalizedSource.toLowerCase().startsWith(previousSource.toLowerCase())) {
+    normalized = normalizedSource.slice(previousSource.length).replace(/^[\s.,!?;:-]+/, "").trim();
+    if (!normalized) return;
+  }
+
+  const lastUser = [...insights.transcript].reverse().find((entry) => entry.role === "user");
+  const lastUserContent = lastUser?.content.replace(/\s+/g, " ").trim();
+  if (lastUserContent && lastUserContent.toLowerCase() === normalized.toLowerCase()) {
+    return;
+  }
+
+  insights.transcript.push({ role: "user", content: normalized, ts: Date.now() });
 }
 
 export function appendAssistantToken(channel: string, token: string) {
